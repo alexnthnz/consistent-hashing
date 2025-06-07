@@ -2,16 +2,20 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/alexnthnz/consistent-hashing"
 )
 
-// CacheNode represents a cache server with basic operations
+// CacheNode represents a cache server node
 type CacheNode struct {
 	*consistenthashing.Node
-	data map[string]string
+	data   map[string]string
+	mutex  sync.RWMutex
+	active bool
 }
 
 // NewCacheNode creates a new cache node
@@ -22,255 +26,548 @@ func NewCacheNode(id, host string, port int) *CacheNode {
 			Host: host,
 			Port: port,
 		},
-		data: make(map[string]string),
+		data:   make(map[string]string),
+		active: true,
 	}
 }
 
-// Set stores a key-value pair in this cache node
-func (cn *CacheNode) Set(key, value string) {
+// Set stores a key-value pair in the cache node
+func (cn *CacheNode) Set(key, value string) error {
+	if !cn.active {
+		return fmt.Errorf("node %s is not active", cn.ID)
+	}
+	
+	cn.mutex.Lock()
+	defer cn.mutex.Unlock()
 	cn.data[key] = value
-	fmt.Printf("[%s] SET %s = %s\n", cn.ID, key, value)
+	return nil
 }
 
-// Get retrieves a value from this cache node
-func (cn *CacheNode) Get(key string) (string, bool) {
-	value, exists := cn.data[key]
-	if exists {
-		fmt.Printf("[%s] GET %s = %s\n", cn.ID, key, value)
-	} else {
-		fmt.Printf("[%s] GET %s = <not found>\n", cn.ID, key)
+// Get retrieves a value from the cache node
+func (cn *CacheNode) Get(key string) (string, error) {
+	if !cn.active {
+		return "", fmt.Errorf("node %s is not active", cn.ID)
 	}
-	return value, exists
+	
+	cn.mutex.RLock()
+	defer cn.mutex.RUnlock()
+	value, exists := cn.data[key]
+	if !exists {
+		return "", fmt.Errorf("key %s not found in node %s", key, cn.ID)
+	}
+	return value, nil
 }
 
-// Size returns the number of items in this cache node
+// Delete removes a key from the cache node
+func (cn *CacheNode) Delete(key string) error {
+	if !cn.active {
+		return fmt.Errorf("node %s is not active", cn.ID)
+	}
+	
+	cn.mutex.Lock()
+	defer cn.mutex.Unlock()
+	delete(cn.data, key)
+	return nil
+}
+
+// Size returns the number of items in the cache node
 func (cn *CacheNode) Size() int {
+	cn.mutex.RLock()
+	defer cn.mutex.RUnlock()
 	return len(cn.data)
 }
 
-// DistributedCache represents a distributed cache using consistent hashing
+// SetActive sets the active status of the node
+func (cn *CacheNode) SetActive(active bool) {
+	cn.mutex.Lock()
+	defer cn.mutex.Unlock()
+	cn.active = active
+}
+
+// IsActive returns whether the node is active
+func (cn *CacheNode) IsActive() bool {
+	cn.mutex.RLock()
+	defer cn.mutex.RUnlock()
+	return cn.active
+}
+
+// DistributedCache represents a distributed cache system
 type DistributedCache struct {
-	ring       *consistenthashing.HashRing
-	cacheNodes map[string]*CacheNode
+	ring         *consistenthashing.HashRing
+	nodes        map[string]*CacheNode
+	replication  int
+	mutex        sync.RWMutex
 }
 
 // NewDistributedCache creates a new distributed cache
-func NewDistributedCache(virtualReplicas int) *DistributedCache {
+func NewDistributedCache(virtualReplicas, replication int) (*DistributedCache, error) {
+	if replication <= 0 {
+		return nil, fmt.Errorf("replication factor must be positive")
+	}
+	
+	ring, err := consistenthashing.NewHashRing(virtualReplicas)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create hash ring: %w", err)
+	}
+	
 	return &DistributedCache{
-		ring:       consistenthashing.NewHashRing(virtualReplicas),
-		cacheNodes: make(map[string]*CacheNode),
-	}
+		ring:        ring,
+		nodes:       make(map[string]*CacheNode),
+		replication: replication,
+	}, nil
 }
 
-// AddCacheNode adds a cache node to the distributed cache
-func (dc *DistributedCache) AddCacheNode(cacheNode *CacheNode) {
-	dc.ring.AddNode(cacheNode.Node)
-	dc.cacheNodes[cacheNode.ID] = cacheNode
-	fmt.Printf("Added cache node: %s (%s)\n", cacheNode.ID, cacheNode.String())
-}
-
-// RemoveCacheNode removes a cache node from the distributed cache
-func (dc *DistributedCache) RemoveCacheNode(nodeID string) {
-	if cacheNode, exists := dc.cacheNodes[nodeID]; exists {
-		// In a real implementation, you'd want to migrate data to other nodes
-		fmt.Printf("Removing cache node: %s (had %d items)\n", nodeID, cacheNode.Size())
-		dc.ring.RemoveNode(nodeID)
-		delete(dc.cacheNodes, nodeID)
-	}
-}
-
-// Set stores a key-value pair in the appropriate cache node
-func (dc *DistributedCache) Set(key, value string) {
-	node := dc.ring.GetNode(key)
-	if node != nil {
-		if cacheNode, exists := dc.cacheNodes[node.ID]; exists {
-			cacheNode.Set(key, value)
-		}
-	}
-}
-
-// Get retrieves a value from the appropriate cache node
-func (dc *DistributedCache) Get(key string) (string, bool) {
-	node := dc.ring.GetNode(key)
-	if node != nil {
-		if cacheNode, exists := dc.cacheNodes[node.ID]; exists {
-			return cacheNode.Get(key)
-		}
-	}
-	return "", false
-}
-
-// SetWithReplication stores a key-value pair with replication
-func (dc *DistributedCache) SetWithReplication(key, value string, replicas int) {
-	nodes := dc.ring.GetNodes(key, replicas)
-	fmt.Printf("Storing '%s' with %d replicas across nodes: ", key, len(nodes))
-	for i, node := range nodes {
-		if i > 0 {
-			fmt.Print(", ")
-		}
-		fmt.Print(node.ID)
-		if cacheNode, exists := dc.cacheNodes[node.ID]; exists {
-			cacheNode.Set(key, value)
-		}
-	}
-	fmt.Println()
-}
-
-// GetStats returns statistics about the distributed cache
-func (dc *DistributedCache) GetStats() {
-	fmt.Println("\n=== Distributed Cache Statistics ===")
-	fmt.Printf("Total cache nodes: %d\n", len(dc.cacheNodes))
-	fmt.Printf("Virtual nodes: %d\n", dc.ring.VirtualSize())
+// AddNode adds a cache node to the distributed cache
+func (dc *DistributedCache) AddNode(node *CacheNode) error {
+	dc.mutex.Lock()
+	defer dc.mutex.Unlock()
 	
+	if err := dc.ring.AddNode(node.Node); err != nil {
+		return fmt.Errorf("failed to add node to ring: %w", err)
+	}
+	
+	dc.nodes[node.ID] = node
+	return nil
+}
+
+// RemoveNode removes a cache node from the distributed cache
+func (dc *DistributedCache) RemoveNode(nodeID string) error {
+	dc.mutex.Lock()
+	defer dc.mutex.Unlock()
+	
+	if err := dc.ring.RemoveNode(nodeID); err != nil {
+		return fmt.Errorf("failed to remove node from ring: %w", err)
+	}
+	
+	if node, exists := dc.nodes[nodeID]; exists {
+		node.SetActive(false)
+		delete(dc.nodes, nodeID)
+	}
+	
+	return nil
+}
+
+// Set stores a key-value pair with replication
+func (dc *DistributedCache) Set(key, value string) error {
+	dc.mutex.RLock()
+	defer dc.mutex.RUnlock()
+	
+	nodes, err := dc.ring.GetNodes(key, dc.replication)
+	if err != nil {
+		return fmt.Errorf("failed to get nodes for key %s: %w", key, err)
+	}
+	
+	var errors []error
+	successCount := 0
+	
+	for _, node := range nodes {
+		if cacheNode, exists := dc.nodes[node.ID]; exists && cacheNode.IsActive() {
+			if err := cacheNode.Set(key, value); err != nil {
+				errors = append(errors, fmt.Errorf("failed to set on node %s: %w", node.ID, err))
+			} else {
+				successCount++
+			}
+		}
+	}
+	
+	if successCount == 0 {
+		return fmt.Errorf("failed to set key %s on any node: %v", key, errors)
+	}
+	
+	return nil
+}
+
+// Get retrieves a value with fallback to replicas
+func (dc *DistributedCache) Get(key string) (string, error) {
+	dc.mutex.RLock()
+	defer dc.mutex.RUnlock()
+	
+	nodes, err := dc.ring.GetNodes(key, dc.replication)
+	if err != nil {
+		return "", fmt.Errorf("failed to get nodes for key %s: %w", key, err)
+	}
+	
+	var lastError error
+	
+	for _, node := range nodes {
+		if cacheNode, exists := dc.nodes[node.ID]; exists && cacheNode.IsActive() {
+			value, err := cacheNode.Get(key)
+			if err == nil {
+				return value, nil
+			}
+			lastError = err
+		}
+	}
+	
+	if lastError != nil {
+		return "", fmt.Errorf("key %s not found in any replica: %w", key, lastError)
+	}
+	
+	return "", fmt.Errorf("no active nodes available for key %s", key)
+}
+
+// Delete removes a key from all replicas
+func (dc *DistributedCache) Delete(key string) error {
+	dc.mutex.RLock()
+	defer dc.mutex.RUnlock()
+	
+	nodes, err := dc.ring.GetNodes(key, dc.replication)
+	if err != nil {
+		return fmt.Errorf("failed to get nodes for key %s: %w", key, err)
+	}
+	
+	var errors []error
+	
+	for _, node := range nodes {
+		if cacheNode, exists := dc.nodes[node.ID]; exists && cacheNode.IsActive() {
+			if err := cacheNode.Delete(key); err != nil {
+				errors = append(errors, fmt.Errorf("failed to delete from node %s: %w", node.ID, err))
+			}
+		}
+	}
+	
+	if len(errors) > 0 {
+		return fmt.Errorf("errors during deletion: %v", errors)
+	}
+	
+	return nil
+}
+
+// GetStats returns cache statistics
+func (dc *DistributedCache) GetStats() map[string]interface{} {
+	dc.mutex.RLock()
+	defer dc.mutex.RUnlock()
+	
+	stats := make(map[string]interface{})
+	stats["total_nodes"] = len(dc.nodes)
+	stats["replication_factor"] = dc.replication
+	
+	activeNodes := 0
 	totalItems := 0
-	for nodeID, cacheNode := range dc.cacheNodes {
-		itemCount := cacheNode.Size()
-		totalItems += itemCount
-		fmt.Printf("Node %s: %d items\n", nodeID, itemCount)
-	}
-	fmt.Printf("Total items: %d\n", totalItems)
+	nodeStats := make(map[string]int)
 	
-	if len(dc.cacheNodes) > 0 {
-		avgItems := float64(totalItems) / float64(len(dc.cacheNodes))
-		fmt.Printf("Average items per node: %.1f\n", avgItems)
+	for nodeID, node := range dc.nodes {
+		if node.IsActive() {
+			activeNodes++
+		}
+		size := node.Size()
+		totalItems += size
+		nodeStats[nodeID] = size
 	}
+	
+	stats["active_nodes"] = activeNodes
+	stats["total_items"] = totalItems
+	stats["node_distribution"] = nodeStats
+	
+	// Add ring information
+	ringInfo := dc.ring.GetRingInfo()
+	for key, value := range ringInfo {
+		stats["ring_"+key] = value
+	}
+	
+	return stats
+}
+
+// SimulateNodeFailure simulates a node failure
+func (dc *DistributedCache) SimulateNodeFailure(nodeID string) error {
+	dc.mutex.RLock()
+	defer dc.mutex.RUnlock()
+	
+	if node, exists := dc.nodes[nodeID]; exists {
+		node.SetActive(false)
+		return nil
+	}
+	
+	return fmt.Errorf("node %s not found", nodeID)
+}
+
+// SimulateNodeRecovery simulates a node recovery
+func (dc *DistributedCache) SimulateNodeRecovery(nodeID string) error {
+	dc.mutex.RLock()
+	defer dc.mutex.RUnlock()
+	
+	if node, exists := dc.nodes[nodeID]; exists {
+		node.SetActive(true)
+		return nil
+	}
+	
+	return fmt.Errorf("node %s not found", nodeID)
 }
 
 func main() {
 	fmt.Println("=== Distributed Cache with Consistent Hashing ===\n")
-	
-	// Create distributed cache with 50 virtual nodes per physical node
-	cache := NewDistributedCache(50)
-	
-	// Create cache nodes
-	cacheNodes := []*CacheNode{
+
+	// Create distributed cache with 3 replicas
+	cache, err := NewDistributedCache(50, 3)
+	if err != nil {
+		log.Fatalf("Failed to create distributed cache: %v", err)
+	}
+
+	// Add cache nodes
+	nodes := []*CacheNode{
 		NewCacheNode("cache1", "192.168.1.10", 6379),
 		NewCacheNode("cache2", "192.168.1.11", 6379),
 		NewCacheNode("cache3", "192.168.1.12", 6379),
+		NewCacheNode("cache4", "192.168.1.13", 6379),
+		NewCacheNode("cache5", "192.168.1.14", 6379),
 	}
-	
-	// Add cache nodes
-	fmt.Println("Setting up cache cluster:")
-	for _, node := range cacheNodes {
-		cache.AddCacheNode(node)
+
+	fmt.Println("Adding cache nodes...")
+	for _, node := range nodes {
+		if err := cache.AddNode(node); err != nil {
+			log.Printf("Failed to add node %s: %v", node.ID, err)
+			continue
+		}
+		fmt.Printf("Added cache node: %s (%s:%d)\n", node.ID, node.Host, node.Port)
 	}
-	fmt.Println()
-	
-	// Simulate cache operations
-	fmt.Println("Performing cache operations:")
+
+	// Store some data
+	fmt.Println("\nStoring data in distributed cache...")
 	testData := map[string]string{
 		"user:1001":    "John Doe",
 		"user:1002":    "Jane Smith",
-		"user:1003":    "Bob Johnson",
 		"session:abc":  "active",
 		"session:def":  "expired",
-		"config:db":    "localhost:5432",
-		"config:redis": "localhost:6379",
 		"product:123":  "Laptop",
 		"product:456":  "Mouse",
-		"product:789":  "Keyboard",
+		"config:db":    "postgresql://localhost:5432/mydb",
+		"config:redis": "redis://localhost:6379",
 	}
-	
-	// Store data
+
 	for key, value := range testData {
-		cache.Set(key, value)
+		if err := cache.Set(key, value); err != nil {
+			log.Printf("Failed to set %s: %v", key, err)
+		} else {
+			fmt.Printf("Stored: %s = %s\n", key, value)
+		}
 	}
-	fmt.Println()
-	
+
 	// Retrieve data
-	fmt.Println("Retrieving data:")
+	fmt.Println("\nRetrieving data from distributed cache...")
 	for key := range testData {
-		cache.Get(key)
+		value, err := cache.Get(key)
+		if err != nil {
+			log.Printf("Failed to get %s: %v", key, err)
+		} else {
+			fmt.Printf("Retrieved: %s = %s\n", key, value)
+		}
 	}
-	fmt.Println()
-	
-	// Show initial stats
-	cache.GetStats()
-	
-	// Demonstrate replication
-	fmt.Println("\n=== Replication Example ===")
-	cache.SetWithReplication("critical:data", "important_value", 2)
-	fmt.Println()
-	
-	// Simulate node failure and recovery
-	fmt.Println("=== Simulating Node Failure ===")
-	cache.RemoveCacheNode("cache2")
-	cache.GetStats()
-	
-	fmt.Println("\nTrying to access data after node failure:")
-	// Some data might be lost (in cache2), but most should still be accessible
-	testKeys := []string{"user:1001", "session:abc", "product:123"}
-	for _, key := range testKeys {
-		cache.Get(key)
+
+	// Show cache statistics
+	fmt.Println("\n--- Cache Statistics ---")
+	stats := cache.GetStats()
+	for key, value := range stats {
+		fmt.Printf("%s: %v\n", key, value)
 	}
-	
-	// Add a new node (simulating recovery or scaling)
-	fmt.Println("\n=== Adding New Cache Node ===")
-	newNode := NewCacheNode("cache4", "192.168.1.14", 6379)
-	cache.AddCacheNode(newNode)
-	
-	// In a real system, you'd redistribute some data to the new node
-	fmt.Println("Redistributing some data to new node...")
-	redistributeData := map[string]string{
-		"user:2001":    "Alice Brown",
-		"user:2002":    "Charlie Wilson",
-		"session:xyz":  "active",
-		"product:999":  "Monitor",
+
+	// Demonstrate replication by checking which nodes have which keys
+	fmt.Println("\n--- Replication Analysis ---")
+	analyzeReplication(cache, testData)
+
+	// Simulate node failure
+	fmt.Println("\n--- Simulating Node Failure ---")
+	failedNode := "cache2"
+	if err := cache.SimulateNodeFailure(failedNode); err != nil {
+		log.Printf("Failed to simulate node failure: %v", err)
+	} else {
+		fmt.Printf("Simulated failure of node: %s\n", failedNode)
 	}
-	
-	for key, value := range redistributeData {
-		cache.Set(key, value)
+
+	// Test data retrieval after failure
+	fmt.Println("\nTesting data retrieval after node failure...")
+	successCount := 0
+	for key := range testData {
+		value, err := cache.Get(key)
+		if err != nil {
+			log.Printf("Failed to get %s after node failure: %v", key, err)
+		} else {
+			fmt.Printf("Successfully retrieved: %s = %s\n", key, value)
+			successCount++
+		}
 	}
-	
-	cache.GetStats()
-	
-	// Demonstrate load balancing
-	fmt.Println("\n=== Load Balancing Analysis ===")
-	simulateLoadBalancing(cache)
+	fmt.Printf("\nSuccessfully retrieved %d out of %d keys after node failure\n", 
+		successCount, len(testData))
+
+	// Show updated statistics
+	fmt.Println("\n--- Statistics After Node Failure ---")
+	stats = cache.GetStats()
+	for key, value := range stats {
+		fmt.Printf("%s: %v\n", key, value)
+	}
+
+	// Simulate node recovery
+	fmt.Println("\n--- Simulating Node Recovery ---")
+	if err := cache.SimulateNodeRecovery(failedNode); err != nil {
+		log.Printf("Failed to simulate node recovery: %v", err)
+	} else {
+		fmt.Printf("Simulated recovery of node: %s\n", failedNode)
+	}
+
+	// Add a new node (scale out)
+	fmt.Println("\n--- Scaling Out (Adding New Node) ---")
+	newNode := NewCacheNode("cache6", "192.168.1.15", 6379)
+	if err := cache.AddNode(newNode); err != nil {
+		log.Printf("Failed to add new node: %v", err)
+	} else {
+		fmt.Printf("Added new cache node: %s\n", newNode.ID)
+	}
+
+	// Demonstrate consistent hashing behavior
+	fmt.Println("\n--- Consistent Hashing Behavior ---")
+	demonstrateConsistentHashing(cache, testData)
+
+	// Performance test
+	fmt.Println("\n--- Performance Test ---")
+	performanceTest(cache)
+
+	// Cleanup test
+	fmt.Println("\n--- Cleanup Test ---")
+	cleanupTest(cache, testData)
+
+	fmt.Println("\n=== Distributed Cache Demo Complete ===")
 }
 
-func simulateLoadBalancing(cache *DistributedCache) {
-	// Generate random keys and see how they distribute
-	rand.Seed(time.Now().UnixNano())
-	keyCount := 1000
+func analyzeReplication(cache *DistributedCache, testData map[string]string) {
+	fmt.Println("Analyzing key distribution across nodes...")
 	
-	fmt.Printf("Distributing %d random keys...\n", keyCount)
+	for key := range testData {
+		nodes, err := cache.ring.GetNodes(key, cache.replication)
+		if err != nil {
+			log.Printf("Failed to get nodes for key %s: %v", key, err)
+			continue
+		}
+		
+		fmt.Printf("Key '%s' replicated on nodes: ", key)
+		for i, node := range nodes {
+			if i > 0 {
+				fmt.Print(", ")
+			}
+			fmt.Print(node.ID)
+		}
+		fmt.Println()
+	}
+}
+
+func demonstrateConsistentHashing(cache *DistributedCache, testData map[string]string) {
+	fmt.Println("Demonstrating consistent hashing properties...")
 	
-	for i := 0; i < keyCount; i++ {
-		key := fmt.Sprintf("random_key_%d", rand.Intn(10000))
-		value := fmt.Sprintf("value_%d", i)
-		cache.Set(key, value)
+	// Record original mappings
+	originalMappings := make(map[string]string)
+	for key := range testData {
+		node, err := cache.ring.GetNode(key)
+		if err != nil {
+			log.Printf("Failed to get primary node for key %s: %v", key, err)
+			continue
+		}
+		originalMappings[key] = node.ID
 	}
 	
-	fmt.Println("\nFinal distribution:")
-	cache.GetStats()
-	
-	// Calculate distribution balance
-	distribution := make(map[string]int)
-	for nodeID, cacheNode := range cache.cacheNodes {
-		distribution[nodeID] = cacheNode.Size()
+	// Add another new node
+	extraNode := NewCacheNode("cache7", "192.168.1.16", 6379)
+	if err := cache.AddNode(extraNode); err != nil {
+		log.Printf("Failed to add extra node: %v", err)
+		return
 	}
+	fmt.Printf("Added extra node: %s\n", extraNode.ID)
 	
-	// Find min and max
-	var min, max int
-	first := true
-	for _, count := range distribution {
-		if first {
-			min, max = count, count
-			first = false
-		} else {
-			if count < min {
-				min = count
-			}
-			if count > max {
-				max = count
-			}
+	// Check how many keys moved
+	movedKeys := 0
+	for key := range testData {
+		node, err := cache.ring.GetNode(key)
+		if err != nil {
+			log.Printf("Failed to get primary node for key %s: %v", key, err)
+			continue
+		}
+		
+		if node.ID != originalMappings[key] {
+			fmt.Printf("Key '%s' moved: %s -> %s\n", key, originalMappings[key], node.ID)
+			movedKeys++
 		}
 	}
 	
-	if max > 0 {
-		balance := float64(min) / float64(max) * 100
-		fmt.Printf("\nLoad balance ratio: %.1f%% (100%% = perfect balance)\n", balance)
-		fmt.Printf("Range: %d - %d items per node\n", min, max)
+	fmt.Printf("Only %d out of %d keys moved (%.1f%%) when adding a new node\n", 
+		movedKeys, len(testData), float64(movedKeys)/float64(len(testData))*100)
+}
+
+func performanceTest(cache *DistributedCache) {
+	fmt.Println("Running performance test...")
+	
+	// Generate test data
+	numOperations := 1000
+	keys := make([]string, numOperations)
+	values := make([]string, numOperations)
+	
+	for i := 0; i < numOperations; i++ {
+		keys[i] = fmt.Sprintf("perf_key_%d", i)
+		values[i] = fmt.Sprintf("perf_value_%d_%d", i, rand.Intn(10000))
 	}
+	
+	// Test SET operations
+	start := time.Now()
+	setErrors := 0
+	for i := 0; i < numOperations; i++ {
+		if err := cache.Set(keys[i], values[i]); err != nil {
+			setErrors++
+		}
+	}
+	setDuration := time.Since(start)
+	
+	// Test GET operations
+	start = time.Now()
+	getErrors := 0
+	for i := 0; i < numOperations; i++ {
+		if _, err := cache.Get(keys[i]); err != nil {
+			getErrors++
+		}
+	}
+	getDuration := time.Since(start)
+	
+	fmt.Printf("Performance Results (%d operations):\n", numOperations)
+	fmt.Printf("SET: %v (%.1f ops/sec, %d errors)\n", 
+		setDuration, float64(numOperations)/setDuration.Seconds(), setErrors)
+	fmt.Printf("GET: %v (%.1f ops/sec, %d errors)\n", 
+		getDuration, float64(numOperations)/getDuration.Seconds(), getErrors)
+	
+	// Cleanup performance test data
+	for i := 0; i < numOperations; i++ {
+		cache.Delete(keys[i])
+	}
+}
+
+func cleanupTest(cache *DistributedCache, testData map[string]string) {
+	fmt.Println("Testing cleanup operations...")
+	
+	deleteErrors := 0
+	for key := range testData {
+		if err := cache.Delete(key); err != nil {
+			log.Printf("Failed to delete %s: %v", key, err)
+			deleteErrors++
+		} else {
+			fmt.Printf("Deleted: %s\n", key)
+		}
+	}
+	
+	if deleteErrors == 0 {
+		fmt.Println("All keys deleted successfully")
+	} else {
+		fmt.Printf("Failed to delete %d keys\n", deleteErrors)
+	}
+	
+	// Verify deletion
+	fmt.Println("\nVerifying deletion...")
+	for key := range testData {
+		if _, err := cache.Get(key); err != nil {
+			fmt.Printf("Confirmed deletion of: %s\n", key)
+		} else {
+			fmt.Printf("WARNING: Key %s still exists after deletion\n", key)
+		}
+	}
+	
+	// Final statistics
+	fmt.Println("\n--- Final Cache Statistics ---")
+	stats := cache.GetStats()
+	for key, value := range stats {
+		fmt.Printf("%s: %v\n", key, value)
+	}
+} 
 } 
