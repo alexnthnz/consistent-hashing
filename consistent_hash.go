@@ -13,11 +13,11 @@ import (
 // Common errors
 var (
 	ErrInvalidVirtualReplicas = errors.New("virtualReplicas must be positive")
-	ErrInvalidNodeID         = errors.New("node ID cannot be empty")
-	ErrInvalidNodeHost       = errors.New("node host cannot be empty")
-	ErrInvalidNodePort       = errors.New("node port must be positive")
-	ErrInvalidCount          = errors.New("count must be positive")
-	ErrNodeNotFound          = errors.New("node not found")
+	ErrInvalidNodeID          = errors.New("node ID cannot be empty")
+	ErrInvalidNodeHost        = errors.New("node host cannot be empty")
+	ErrInvalidNodePort        = errors.New("node port must be positive")
+	ErrInvalidCount           = errors.New("count must be positive")
+	ErrNodeNotFound           = errors.New("node not found")
 )
 
 // HashFunction defines the interface for hash functions
@@ -108,12 +108,12 @@ func NewHashRing(virtualReplicas int, opts ...Option) (*HashRing, error) {
 		virtualReplicas: virtualReplicas,
 		hasher:          &FNVHasher{}, // Default to faster FNV hash
 	}
-	
+
 	// Apply options
 	for _, opt := range opts {
 		opt(hr)
 	}
-	
+
 	return hr, nil
 }
 
@@ -134,14 +134,14 @@ func (hr *HashRing) AddNode(node *Node) error {
 	if node == nil {
 		return errors.New("node cannot be nil")
 	}
-	
+
 	if err := node.Validate(); err != nil {
 		return fmt.Errorf("invalid node: %w", err)
 	}
 
 	hr.mu.Lock()
 	defer hr.mu.Unlock()
-	
+
 	if _, exists := hr.nodes[node.ID]; exists {
 		return nil // Node already exists, not an error
 	}
@@ -171,7 +171,7 @@ func (hr *HashRing) AddNode(node *Node) error {
 	sort.Slice(hr.virtualNodes, func(i, j int) bool {
 		return hr.virtualNodes[i].Hash < hr.virtualNodes[j].Hash
 	})
-	
+
 	return nil
 }
 
@@ -183,7 +183,7 @@ func (hr *HashRing) RemoveNode(nodeID string) error {
 
 	hr.mu.Lock()
 	defer hr.mu.Unlock()
-	
+
 	if _, exists := hr.nodes[nodeID]; !exists {
 		return ErrNodeNotFound
 	}
@@ -199,7 +199,7 @@ func (hr *HashRing) RemoveNode(nodeID string) error {
 		}
 	}
 	hr.virtualNodes = hr.virtualNodes[:writeIndex]
-	
+
 	return nil
 }
 
@@ -211,7 +211,7 @@ func (hr *HashRing) GetNode(key string) (*Node, error) {
 
 	hr.mu.RLock()
 	defer hr.mu.RUnlock()
-	
+
 	if len(hr.virtualNodes) == 0 {
 		return nil, errors.New("no nodes available in the ring")
 	}
@@ -242,18 +242,18 @@ func (hr *HashRing) GetNodes(key string, count int) ([]*Node, error) {
 
 	hr.mu.RLock()
 	defer hr.mu.RUnlock()
-	
+
 	if len(hr.virtualNodes) == 0 {
 		return nil, errors.New("no nodes available in the ring")
 	}
 
 	hash := hr.hash(key)
 	nodes := make([]*Node, 0, count)
-	
+
 	// Optimize for small rings: use slice-based approach instead of map
 	var seen map[string]bool
 	var seenSlice []string
-	
+
 	if len(hr.nodes) <= 10 {
 		// For small rings, use slice-based deduplication (more memory efficient)
 		seenSlice = make([]string, 0, len(hr.nodes))
@@ -275,7 +275,7 @@ func (hr *HashRing) GetNodes(key string, count int) ([]*Node, error) {
 		}
 
 		node := hr.virtualNodes[idx].Node
-		
+
 		// Check if we've seen this node before
 		var alreadySeen bool
 		if seen != nil {
@@ -297,7 +297,7 @@ func (hr *HashRing) GetNodes(key string, count int) ([]*Node, error) {
 				uniqueNodesFound++
 			}
 		}
-		
+
 		if !alreadySeen {
 			nodes = append(nodes, node)
 		}
@@ -311,17 +311,17 @@ func (hr *HashRing) GetNodes(key string, count int) ([]*Node, error) {
 func (hr *HashRing) GetAllNodes() []*Node {
 	hr.mu.RLock()
 	defer hr.mu.RUnlock()
-	
+
 	nodes := make([]*Node, 0, len(hr.nodes))
 	for _, node := range hr.nodes {
 		nodes = append(nodes, node)
 	}
-	
+
 	// Sort by ID for deterministic results (useful for testing/debugging)
 	sort.Slice(nodes, func(i, j int) bool {
 		return nodes[i].ID < nodes[j].ID
 	})
-	
+
 	return nodes
 }
 
@@ -333,12 +333,12 @@ func (hr *HashRing) GetNodeByID(nodeID string) (*Node, error) {
 
 	hr.mu.RLock()
 	defer hr.mu.RUnlock()
-	
+
 	node, exists := hr.nodes[nodeID]
 	if !exists {
 		return nil, ErrNodeNotFound
 	}
-	
+
 	return node, nil
 }
 
@@ -350,7 +350,7 @@ func (hr *HashRing) HasNode(nodeID string) bool {
 
 	hr.mu.RLock()
 	defer hr.mu.RUnlock()
-	
+
 	_, exists := hr.nodes[nodeID]
 	return exists
 }
@@ -359,7 +359,7 @@ func (hr *HashRing) HasNode(nodeID string) bool {
 func (hr *HashRing) Size() int {
 	hr.mu.RLock()
 	defer hr.mu.RUnlock()
-	
+
 	return len(hr.nodes)
 }
 
@@ -367,7 +367,7 @@ func (hr *HashRing) Size() int {
 func (hr *HashRing) VirtualSize() int {
 	hr.mu.RLock()
 	defer hr.mu.RUnlock()
-	
+
 	return len(hr.virtualNodes)
 }
 
@@ -378,7 +378,7 @@ func (hr *HashRing) GetLoadDistribution(keys []string) (map[string]int, error) {
 	}
 
 	distribution := make(map[string]int)
-	
+
 	for _, key := range keys {
 		if key == "" {
 			continue // Skip empty keys
@@ -391,7 +391,7 @@ func (hr *HashRing) GetLoadDistribution(keys []string) (map[string]int, error) {
 			distribution[node.ID]++
 		}
 	}
-	
+
 	return distribution, nil
 }
 
@@ -399,17 +399,17 @@ func (hr *HashRing) GetLoadDistribution(keys []string) (map[string]int, error) {
 func (hr *HashRing) GetRingInfo() map[string]interface{} {
 	hr.mu.RLock()
 	defer hr.mu.RUnlock()
-	
+
 	info := make(map[string]interface{})
 	info["physical_nodes"] = len(hr.nodes)
 	info["virtual_nodes"] = len(hr.virtualNodes)
 	info["virtual_replicas"] = hr.virtualReplicas
-	
+
 	// Calculate average virtual nodes per physical node
 	if len(hr.nodes) > 0 {
 		info["avg_virtual_per_physical"] = float64(len(hr.virtualNodes)) / float64(len(hr.nodes))
 	}
-	
+
 	// Add hash function type
 	switch hr.hasher.(type) {
 	case *FNVHasher:
@@ -419,7 +419,7 @@ func (hr *HashRing) GetRingInfo() map[string]interface{} {
 	default:
 		info["hash_function"] = "Custom"
 	}
-	
+
 	return info
 }
 
@@ -427,14 +427,14 @@ func (hr *HashRing) GetRingInfo() map[string]interface{} {
 func (hr *HashRing) ValidateRing() error {
 	hr.mu.RLock()
 	defer hr.mu.RUnlock()
-	
+
 	// Check if virtual nodes are properly sorted
 	for i := 1; i < len(hr.virtualNodes); i++ {
 		if hr.virtualNodes[i-1].Hash > hr.virtualNodes[i].Hash {
 			return errors.New("virtual nodes are not properly sorted")
 		}
 	}
-	
+
 	// Check if all virtual nodes point to valid physical nodes
 	for _, vnode := range hr.virtualNodes {
 		if vnode.Node == nil {
@@ -444,6 +444,6 @@ func (hr *HashRing) ValidateRing() error {
 			return fmt.Errorf("virtual node points to non-existent physical node: %s", vnode.Node.ID)
 		}
 	}
-	
+
 	return nil
-} 
+}
